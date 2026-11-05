@@ -629,6 +629,10 @@ namespace {
         return Mod::get()->getSettingValue<bool>("ui-glow");
     }
 
+    bool getOrbCentering() {
+        return Mod::get()->getSettingValue<bool>("orb-centering");
+    }
+
     float getUIPanelScale() {
         return static_cast<float>(Mod::get()->getSettingValue<double>("ui-panel-scale"));
     }
@@ -2691,7 +2695,7 @@ finally {
             return;
         }
 
-        constexpr int SEGMENTS = 12;
+        constexpr int SEGMENTS = 20;
         constexpr float PI = 3.14159265358979323846f;
         CCPoint points[4 * (SEGMENTS + 1)];
         int count = 0;
@@ -2924,7 +2928,18 @@ finally {
         auto* background = makeDrawNode();
         float radius = std::min(rect.size.height * 0.25f, 7.f);
         if (isFilled) {
+            drawCurvedRect(background, CCRect(0.f, -1.5f, rect.size.width, rect.size.height), radius, color4(0, 0, 0, 60), transparent, 0.f);
             drawCurvedRect(background, CCRect(0.f, 0.f, rect.size.width, rect.size.height), radius, color4(accentColor(), 238), panelTint(44), 1.f);
+            // glossy top half
+            float const sheenHeight = rect.size.height * 0.5f;
+            drawCurvedRect(
+                background,
+                CCRect(1.f, rect.size.height - sheenHeight - 1.f, rect.size.width - 2.f, sheenHeight),
+                std::max(0.f, radius - 1.f),
+                color4(255, 255, 255, 26),
+                transparent,
+                0.f
+            );
         }
         else if (isTinted) {
             drawCurvedRect(background, CCRect(0.f, 0.f, rect.size.width, rect.size.height), radius, color4(accentColor(), 30), color4(accentColor(), 95), 1.f);
@@ -3640,13 +3655,17 @@ finally {
         m_glow = makeDrawNode();
         m_deck->addChild(m_glow, 0);
         if (getUIGlow()) {
-            for (int ring = 5; ring >= 1; --ring) {
-                float spread = 3.5f * static_cast<float>(ring);
+            // stacked translucent rings build a soft bloom: the outer rings are
+            // faint and wide, each inner ring adds a little more colour.
+            constexpr int GLOW_RINGS = 10;
+            for (int ring = GLOW_RINGS; ring >= 1; --ring) {
+                float spread = 2.6f * static_cast<float>(ring);
+                int alpha = 2 + (GLOW_RINGS - ring) * 2;
                 drawCurvedRect(
                     m_glow,
                     CCRect(-spread, -spread, DECK_WIDTH + spread * 2.f, DECK_HEIGHT + spread * 2.f),
                     DECK_RADIUS + spread,
-                    color4(accentColor(), 3),
+                    color4(mixColor(accentColor(), secondaryColor(), static_cast<float>(ring) / GLOW_RINGS * 0.5f), alpha),
                     none,
                     0.f
                 );
@@ -3655,8 +3674,55 @@ finally {
 
         m_shell = makeDrawNode();
         m_deck->addChild(m_shell, 1);
-        drawCurvedRect(m_shell, CCRect(-12.f, -22.f, DECK_WIDTH + 24.f, DECK_HEIGHT + 22.f), DECK_RADIUS + 6.f, color4(0, 0, 0, 72), none, 0.f);
+        // layered drop shadow, offset down so the panel looks lifted
+        for (int layer = 4; layer >= 1; --layer) {
+            float grow = 3.f * static_cast<float>(layer);
+            drawCurvedRect(
+                m_shell,
+                CCRect(-grow, -grow - 8.f, DECK_WIDTH + grow * 2.f, DECK_HEIGHT + grow * 2.f),
+                DECK_RADIUS + grow,
+                color4(0, 0, 0, 14 + (4 - layer) * 10),
+                none,
+                0.f
+            );
+        }
         drawCurvedRect(m_shell, CCRect(0.f, 0.f, DECK_WIDTH, DECK_HEIGHT), DECK_RADIUS, color4(shellTint, 252), panelTint(26), 1.f);
+        // header band: a faint accent wash fading downward plus a glossy top edge
+        {
+            constexpr int BAND_STEPS = 8;
+            float const bandBottom = HEADER_Y - 34.f;
+            float const bandTop = DECK_HEIGHT - 1.f;
+            for (int step = 0; step < BAND_STEPS; ++step) {
+                float const t = static_cast<float>(step) / static_cast<float>(BAND_STEPS);
+                float const y = bandBottom + (bandTop - bandBottom) * t;
+                drawCurvedRect(
+                    m_shell,
+                    CCRect(1.f, y, DECK_WIDTH - 2.f, bandTop - y),
+                    std::min(DECK_RADIUS - 1.f, (bandTop - y) * 0.5f),
+                    color4(accentColor(), 3),
+                    none,
+                    0.f
+                );
+            }
+            float const lineY = DECK_HEIGHT - 1.5f;
+            float const inset = DECK_RADIUS + 6.f;
+            float const lineLength = DECK_WIDTH - inset * 2.f;
+            constexpr int LINE_PARTS = 16;
+            for (int part = 0; part < LINE_PARTS; ++part) {
+                float const t0 = static_cast<float>(part) / LINE_PARTS;
+                float const t1 = static_cast<float>(part + 1) / LINE_PARTS;
+                float const mid = (t0 + t1) * 0.5f;
+                // brightest in the middle, fading to nothing at the corners
+                float const fade = 1.f - std::abs(mid - 0.5f) * 2.f;
+                ccColor3B const tint = mixColor(accentColor(), secondaryColor(), mid);
+                m_shell->drawSegment(
+                    CCPoint(inset + lineLength * t0, lineY),
+                    CCPoint(inset + lineLength * t1, lineY),
+                    0.9f,
+                    color4(tint, static_cast<int>(40.f + 170.f * fade))
+                );
+            }
+        }
         // resize grip, bottom right corner
         for (int k = 0; k < 3; ++k) {
             float o = 8.f + static_cast<float>(k) * 5.f;
@@ -4952,12 +5018,18 @@ finally {
         m_scrim->stopAllActions();
         m_scrim->setVisible(true);
         m_scrim->setOpacity(0);
-        m_scrim->runAction(CCFadeTo::create(0.16f, 150));
+        m_scrim->runAction(CCFadeTo::create(0.2f, 165));
 
         m_deck->stopAllActions();
         m_deck->setVisible(true);
-        m_deck->setScale(m_deckScale * 0.88f);
-        m_deck->runAction(CCEaseBackOut::create(CCScaleTo::create(0.3f, m_deckScale)));
+        CCPoint const restPosition = m_deck->getPosition();
+        m_deck->setScale(m_deckScale * 0.92f);
+        m_deck->setPosition(CCPoint(restPosition.x, restPosition.y - 14.f));
+        m_deck->runAction(CCSpawn::create(
+            CCEaseBackOut::create(CCScaleTo::create(0.32f, m_deckScale)),
+            CCEaseExponentialOut::create(CCMoveTo::create(0.32f, restPosition)),
+            nullptr
+        ));
 
         if (m_tutorialStep < 0 && !Mod::get()->getSavedValue<bool>(TUTORIAL_DONE_KEY, false)) {
             startTutorial();
@@ -5843,13 +5915,31 @@ finally {
         float travel = m_tabIndTarget - m_tabIndX;
         float stretch = std::min(std::abs(travel) * 0.2f, 28.f);
         float x = travel >= 0.f ? m_tabIndX : m_tabIndX - stretch;
+        float const pillWidth = baseWidth + stretch;
+        // soft halo behind the active tab
         drawCurvedRect(
             m_tabBar,
-            CCRect(x, TAB_LABEL_Y - 17.f, baseWidth + stretch, 34.f),
+            CCRect(x - 3.f, TAB_LABEL_Y - 20.f, pillWidth + 6.f, 40.f),
+            11.f,
+            color4(accentColor(), 12),
+            color4(0, 0, 0, 0),
+            0.f
+        );
+        drawCurvedRect(
+            m_tabBar,
+            CCRect(x, TAB_LABEL_Y - 17.f, pillWidth, 34.f),
             8.f,
-            color4(accentColor(), 26),
-            color4(accentColor(), 74),
+            color4(accentColor(), 30),
+            color4(accentColor(), 90),
             1.f
+        );
+        // bright underline that glides with the pill
+        float const underlineInset = std::min(18.f, pillWidth * 0.25f);
+        m_tabBar->drawSegment(
+            CCPoint(x + underlineInset, TAB_LABEL_Y - 14.5f),
+            CCPoint(x + pillWidth - underlineInset, TAB_LABEL_Y - 14.5f),
+            1.2f,
+            color4(mixColor(accentColor(), secondaryColor(), 0.35f), 230)
         );
     }
 
@@ -7163,7 +7253,7 @@ finally {
         return std::max(orbRadius, 12.f);
     }
 
-    int alignOrb(PlayLayer* gameLayer, PlayerObject* player1, PlayerObject* player2, bool isDual, int horizonTicks, int releaseAfterTicks, int learnedDelay, int* landingTick) {
+    int alignOrb(PlayLayer* gameLayer, PlayerObject* player1, PlayerObject* player2, bool isDual, int horizonTicks, int releaseAfterTicks, int learnedDelay, int* landingTick, int stageMaxDelayTicks = 0) {
         int searchWindowTicks = st(std::clamp(state.orbWindowTicks, 1, 64));
         int foundTick = 0;
         SimEnd simulationEnd;
@@ -7254,6 +7344,54 @@ finally {
                 state.wasOrbTiming = true;
                 if (timingResult >= horizonTicks) {
                     break;
+                }
+            }
+            if (foundTick > 0) {
+                state.intendedOrbObject = currentRing;
+            }
+        }
+        else if (currentUsesOrb && currentResult >= horizonTicks && state.orbTimingEnabled && getOrbCentering()) {
+            // the press survives, but it grabs the orb the moment the hitbox edge
+            // is touched, which feels (and jumps) early. slide the press toward
+            // the tick where the player passes closest to the orb centre, as long
+            // as that later press still uses the same orb and still survives.
+            ProbeOrb const* centerProbe = nullptr;
+            for (auto const& timingProbe : state.probeOrbCandidates) {
+                if (timingProbe.ringObject == currentRing) {
+                    centerProbe = &timingProbe;
+                    break;
+                }
+            }
+            int const stageCap = stageMaxDelayTicks > 0 ? stageMaxDelayTicks : maxDelayTicks;
+            if (centerProbe && centerProbe->touchDistanceSquared > 1e-6f) {
+                int const edgeTick = std::max(0, centerProbe->touchSampleTick);
+                int const centerTick = centerProbe->closeSampleTick;
+                bool const centerIsLater = centerTick - edgeTick >= 2;
+                bool const centerIsCloser = centerProbe->closeDistanceSquared
+                    < centerProbe->touchDistanceSquared * (CLOSE_DISTANCE_FRACTION * CLOSE_DISTANCE_FRACTION);
+                if (centerIsLater && centerIsCloser && centerTick <= std::min(searchWindowTicks, stageCap)) {
+                    // centre first, then fan out: -1, +1, -2, +2, -3
+                    int const offsets[] = { 0, -1, 1, -2, 2, -3 };
+                    for (int offset : offsets) {
+                        int centerDelay = centerTick + offset;
+                        if (centerDelay <= edgeTick || centerDelay < 1 || centerDelay > std::min(maxDelayTicks, stageCap)) {
+                            continue;
+                        }
+                        int centerResult = simulate(gameLayer, player1, player2, isDual, centerDelay, true, horizonTicks, releaseAfterTicks, horizonTicks, &simulationEnd);
+                        bool isCenterOrbUsed = state.pressOrbRingObject == currentRing;
+                        if (state.explainEnabled) {
+                            traceText += fmt::format(" c+{}:{}{}", centerDelay, centerResult, isCenterOrbUsed ? "o" : "-");
+                        }
+                        if (simulationEnd == SimEnd::StopSearch) {
+                            break;
+                        }
+                        if (isCenterOrbUsed && centerResult >= horizonTicks) {
+                            foundTick = centerDelay;
+                            *landingTick = centerResult;
+                            state.wasOrbTiming = true;
+                            break;
+                        }
+                    }
                 }
             }
             if (foundTick > 0) {
@@ -7772,7 +7910,7 @@ finally {
         bool isGrounded = player1->m_isOnGround && (!player2 || player2->m_isOnGround);
         if (isDown && !hasWave && !hasShip && state.orbAlignEnabled && state.smartEnabled && (!isGrounded || state.orbAlignToGround)) {
             int orbLandingTick = 0;
-            int candidateDelay = alignOrb(playLayer, player1, player2, isDual, horizonTicks, releaseAfterTicks, 0, &orbLandingTick);
+            int candidateDelay = alignOrb(playLayer, player1, player2, isDual, horizonTicks, releaseAfterTicks, 0, &orbLandingTick, maxDelayTicks);
             if (candidateDelay > 0) {
                 say("orb {} +{}t ({:g}f) -> {}t", state.wasOrbTiming ? "timing" : "press", candidateDelay, candidateDelay * TICK_DURATION, orbLandingTick);
                 state.inputShiftTicks = candidateDelay;

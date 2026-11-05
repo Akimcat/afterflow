@@ -81,6 +81,17 @@
         "mac"
       ]
     },
+    "gameplay-title": {
+      "type": "title",
+      "name": "gameplay",
+      "description": "prediction tweaks"
+    },
+    "orb-centering": {
+      "type": "bool",
+      "name": "orb centering",
+      "description": "when a click would grab an orb right at its edge, wait a few ticks so it hits near the centre instead (only if that still survives)",
+      "default": true
+    },
     "ui-title": {
       "type": "title",
       "name": "ui customization",

@@ -1,3 +1,14 @@
+# v2.2.5 (custom)
+
+- **fix: orbs hitting too early.** when a press would already grab an orb right at the edge of its hitbox (and survive), afterflow used to deliver it instantly, so the orb fired on first contact. it now slides the press toward the tick where you pass closest to the orb centre, as long as that press still uses the same orb, still survives, and stays inside the stage's delay. toggle with the new **orb centering** setting (on by default).
+- panel glow is now a real soft bloom (10 graded rings instead of 5 nearly invisible ones).
+- layered drop shadow so the panel looks lifted off the game.
+- accent header wash and a glossy gradient top edge.
+- active tab gets a halo and a gliding underline.
+- filled buttons get a drop shadow and a glossy top half.
+- smoother rounded corners (12 -> 20 segments).
+- the panel now slides up while it scales in, and the backdrop is a bit darker.
+
 # v2.2.4
 
 - **fix: ios crash at the end of the loading bar.** the panel was being built from `CCDirector::willSwitchToScene`, i.e. in the middle of the loading screen -> menu transition, and allocating fonts and sprites there is what kills ios. the overlay is now built on the next main thread tick, against whichever scene is running by then.
