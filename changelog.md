@@ -1,5 +1,6 @@
 # v2.2.5 (custom)
 
+- **fix: orb and pad animations playing before you reach them.** the ghost uses the real object while testing ticks, and that played its animation on the real level. `RingObject::powerOnObject`, `RingObject::triggerActivated`, `EffectGameObject::playTriggerEffect`, `EffectGameObject::animationTriggered` and `GameObject::playDestroyObjectAnim` are now skipped during simulation, the same way click before frames does it.
 - **fix: orbs hitting too early.** when a press would already grab an orb right at the edge of its hitbox (and survive), afterflow used to deliver it instantly, so the orb fired on first contact. it now slides the press toward the tick where you pass closest to the orb centre, as long as that press still uses the same orb, still survives, and stays inside the stage's delay. toggle with the new **orb centering** setting (on by default).
 - panel glow is now a real soft bloom (10 graded rings instead of 5 nearly invisible ones).
 - layered drop shadow so the panel looks lifted off the game.

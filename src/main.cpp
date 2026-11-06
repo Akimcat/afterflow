@@ -8621,6 +8621,22 @@ class $modify(BufEffectGameObject, EffectGameObject) {
         }
         EffectGameObject::triggerObject(gameLayer, uniqueId, remapKeyVector);
     }
+
+    // visual only, so it must never come from a ghost
+    void playTriggerEffect() {
+        if (state.isSimulating) {
+            return;
+        }
+        EffectGameObject::playTriggerEffect();
+    }
+
+    // a pad's own animation, which otherwise plays when a ghost touches the pad
+    void animationTriggered() {
+        if (state.isSimulating) {
+            return;
+        }
+        EffectGameObject::animationTriggered();
+    }
 };
 
 class $modify(BufGameObject, GameObject) {
@@ -8634,11 +8650,29 @@ class $modify(BufGameObject, GameObject) {
         }
         GameObject::playShineEffect();
     }
+
+    // visual only, so it must never come from a ghost
+    void playDestroyObjectAnim(GJBaseGameLayer* gameLayer) {
+        if (state.isSimulating) {
+            return;
+        }
+        GameObject::playDestroyObjectAnim(gameLayer);
+    }
 };
 
 class $modify(BufRingObject, RingObject) {
     static void onModify(auto& self) {
+        (void)self.setHookPriority("RingObject::powerOnObject", MOD_HOOK_PRIORITY);
         (void)self.setHookPriority("RingObject::spawnCircle", MOD_HOOK_PRIORITY);
+    }
+
+    // a ghost using an orb while trying ticks must not play the orb's "used"
+    // animation on the real level, or it shows before the player gets there.
+    void powerOnObject(int powerState) {
+        if (state.isSimulating) {
+            return;
+        }
+        RingObject::powerOnObject(powerState);
     }
 
     void spawnCircle() {
@@ -8647,6 +8681,17 @@ class $modify(BufRingObject, RingObject) {
         }
         RingObject::spawnCircle();
     }
+
+    // on ios and macos this is a tiny stub that jumps into powerOnObject (hooked
+    // above), and it is too short to hook safely on arm64.
+#if !defined(GEODE_IS_IOS) && !defined(GEODE_IS_MACOS)
+    void triggerActivated(float xPosition) {
+        if (state.isSimulating) {
+            return;
+        }
+        RingObject::triggerActivated(xPosition);
+    }
+#endif
 };
 
 class $modify(BufPlayerObject, PlayerObject) {
