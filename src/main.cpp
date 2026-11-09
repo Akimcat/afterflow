@@ -21,6 +21,7 @@
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/RingObject.hpp>
+#include <Geode/cocos/layers_scenes_transitions_nodes/CCTransition.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -149,6 +150,10 @@ namespace {
     constexpr int CUSTOM_TICKS_MIN = 1;
     constexpr int CUSTOM_TICKS_MAX = 240;
     constexpr int CUSTOM_TICKS_SAFE = 120;
+    constexpr int MODE_TICK_COUNT = 8;
+    char const* const MODE_TICK_NAMES[MODE_TICK_COUNT] = {
+        "cube", "ship", "ball", "ufo", "wave", "robot", "spider", "swing"
+    };
 
     struct CustomStage {
         int ticksAll;
@@ -229,6 +234,90 @@ namespace {
         }
         loadCustomStages();
         return index >= STAGE_TABLE_SIZE && index < stageTotalCount();
+    }
+
+    int g_modeTicks[MODE_TICK_COUNT] = {};
+    bool g_modeTicksLoaded = false;
+
+    int clampModeTicks(int value) {
+        return std::clamp(value, 0, CUSTOM_TICKS_MAX);
+    }
+
+    void loadModeTicks() {
+        if (g_modeTicksLoaded) {
+            return;
+        }
+        g_modeTicksLoaded = true;
+        for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+            g_modeTicks[index] = 0;
+        }
+        std::string raw = Mod::get()->getSavedValue<std::string>("mode-ticks", "");
+        size_t start = 0;
+        int slot = 0;
+        while (start <= raw.size() && slot < MODE_TICK_COUNT) {
+            size_t end = raw.find(',', start);
+            if (end == std::string::npos) {
+                end = raw.size();
+            }
+            if (end > start) {
+                int value = 0;
+                bool found = false;
+                for (size_t index = start; index < end; ++index) {
+                    char character = raw[index];
+                    if (character >= '0' && character <= '9') {
+                        value = value * 10 + (character - '0');
+                        found = true;
+                    }
+                }
+                if (found) {
+                    g_modeTicks[slot] = clampModeTicks(value);
+                }
+                ++slot;
+            }
+            start = end + 1;
+        }
+    }
+
+    void saveModeTicks() {
+        std::string raw;
+        for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+            if (index > 0) {
+                raw += ',';
+            }
+            raw += std::to_string(g_modeTicks[index]);
+        }
+        Mod::get()->setSavedValue<std::string>("mode-ticks", raw);
+        (void)Mod::get()->saveData();
+    }
+
+    int modeTicksAt(int mode) {
+        loadModeTicks();
+        if (mode < 0 || mode >= MODE_TICK_COUNT) {
+            return 0;
+        }
+        return g_modeTicks[mode];
+    }
+
+    void setModeTicksAt(int mode, int value) {
+        loadModeTicks();
+        if (mode < 0 || mode >= MODE_TICK_COUNT) {
+            return;
+        }
+        g_modeTicks[mode] = clampModeTicks(value);
+        saveModeTicks();
+    }
+
+    int clearModeTicks() {
+        loadModeTicks();
+        int cleared = 0;
+        for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+            if (g_modeTicks[index] > 0) {
+                ++cleared;
+            }
+            g_modeTicks[index] = 0;
+        }
+        saveModeTicks();
+        return cleared;
     }
 
     struct QueuedInput {
@@ -455,6 +544,34 @@ namespace {
         return std::max(1, static_cast<int>(std::lround(ticksAt240Hz * stepScale())));
     }
 
+    int activeModeIndex() {
+        auto* manager = GameManager::get();
+        if (!manager || !manager->m_playLayer) {
+            return -1;
+        }
+        auto* player = manager->m_playLayer->m_player1;
+        if (!player) {
+            return -1;
+        }
+        if (player->m_isShip) { return 1; }
+        if (player->m_isBall) { return 2; }
+        if (player->m_isBird) { return 3; }
+        if (player->m_isDart) { return 4; }
+        if (player->m_isRobot) { return 5; }
+        if (player->m_isSpider) { return 6; }
+        if (player->m_isSwing) { return 7; }
+        return 0;
+    }
+
+    int stageTicksForMode(int mode) {
+        if (mode == 4) {
+            return state.ticksWaveMode;
+        }
+        if (mode == 1) {
+            return std::clamp(state.shipMaxDelayTicks, 0, 16);
+        }
+        return state.ticksAllModes;
+    }
     std::string wineUser() {
         if (auto* userName = std::getenv("USER"); userName && *userName) {
             return userName;
@@ -1572,7 +1689,7 @@ finally {
 
     void showUpdateOverlay() {
         auto* scene = cocos2d::CCScene::get();
-        if (!scene || updateOverlay.layer) {
+        if (!scene || typeinfo_cast<CCTransitionScene*>(scene) || updateOverlay.layer) {
             return;
         }
         auto* layer = UpdateOverlayLayer::create();
@@ -1780,6 +1897,53 @@ finally {
         return true;
     }
 
+    std::string tagUrlFor(std::string const& version, bool withPrefix) {
+        return fmt::format("{}{}{}", RELEASE_URL_PREFIX, withPrefix ? "v" : "", version);
+    }
+
+    bool tagPageExists(web::WebResponse const& response) {
+        auto code = response.code();
+        return code != 0 && code != 404;
+    }
+
+    void announceUpdate(bool isLoud, std::string const& installedVersion, std::string const& latestVersion) {
+        auto updateUrlText = fmt::format("{}{}", RELEASE_URL_PREFIX, latestVersion);
+        say("out of date: v{} installed, latest is {}", installedVersion, latestVersion);
+        say("update at {}", updateUrlText);
+        log::warn("afterflow is out of date: v{} installed, latest is {}", installedVersion, latestVersion);
+        log::warn("update at {}", updateUrlText);
+
+        pendingUpdateNotice.installedVersion = installedVersion;
+        pendingUpdateNotice.latestVersion = latestVersion;
+        pendingUpdateNotice.urlText = updateUrlText;
+        showUpdatePopup();
+    }
+
+    void checkUpdateTag(bool isLoud, std::string const& installedVersion, std::string const& latestVersion) {
+        async::spawn(
+            web::WebRequest().get(tagUrlFor(latestVersion, false)),
+            [isLoud, installedVersion, latestVersion](web::WebResponse plainResponse) {
+                if (tagPageExists(plainResponse)) {
+                    announceUpdate(isLoud, installedVersion, latestVersion);
+                    return;
+                }
+                async::spawn(
+                    web::WebRequest().get(tagUrlFor(latestVersion, true)),
+                    [isLoud, installedVersion, latestVersion](web::WebResponse prefixedResponse) {
+                        if (tagPageExists(prefixedResponse)) {
+                            announceUpdate(isLoud, installedVersion, latestVersion);
+                            return;
+                        }
+                        if (isLoud) {
+                            say("version check: v{} is in version.txt but the tag is not pushed yet, not showing an update", latestVersion);
+                        }
+                        log::info("afterflow update held back, no tag for v{} yet", latestVersion);
+                    }
+                );
+            }
+        );
+    }
+
     void checkForUpdates(bool isLoud) {
         static bool hasChecked = false;
         static auto lastCheckTime = std::chrono::steady_clock::now() - std::chrono::minutes(11);
@@ -1824,16 +1988,7 @@ finally {
                     return;
                 }
 
-                auto updateUrlText = fmt::format("{}{}", RELEASE_URL_PREFIX, latestVersion);
-                say("out of date: v{} installed, latest is {}", installedVersion, latestVersion);
-                say("update at {}", updateUrlText);
-                log::warn("afterflow is out of date: v{} installed, latest is {}", installedVersion, latestVersion);
-                log::warn("update at {}", updateUrlText);
-
-                pendingUpdateNotice.installedVersion = installedVersion;
-                pendingUpdateNotice.latestVersion = latestVersion;
-                pendingUpdateNotice.urlText = updateUrlText;
-                showUpdatePopup();
+                checkUpdateTag(isLoud, installedVersion, latestVersion);
             }
         );
     }
@@ -2317,7 +2472,7 @@ finally {
     constexpr float HEADER_Y = 428.f;
     constexpr float STATUS_HEIGHT = 28.f;
 
-    constexpr int TAB_COUNT = 3;
+    constexpr int TAB_COUNT = 4;
     constexpr float TAB_LABEL_Y = 388.f;
     constexpr float TAB_UNDERLINE_Y = 366.f;
     constexpr float TAB_HIT_HEIGHT = 36.f;
@@ -2793,11 +2948,51 @@ finally {
     }
 
     char const* tabName(int index) {
-        static char const* names[TAB_COUNT] = { "log", "stage", "settings" };
+        static char const* names[TAB_COUNT] = { "log", "stage", "settings", "modes" };
         if (index < 0 || index >= TAB_COUNT) {
             return "";
         }
         return names[index];
+    }
+
+    constexpr float MODE_TICK_TILE_W = 150.f;
+    constexpr float MODE_TICK_TILE_H = 100.f;
+    constexpr float MODE_TICK_TILE_GAP = 10.f;
+    constexpr float MODE_TICK_ROW_TOP = 290.f;
+    constexpr float MODE_TICKS_HINT_Y = 308.f;
+
+    CCRect modeTickCellRect(int index) {
+        int const column = index % 4;
+        int const row = index / 4;
+        float const totalWidth = MODE_TICK_TILE_W * 4.f + MODE_TICK_TILE_GAP * 3.f;
+        float const startX = CONTENT_X + (CONTENT_WIDTH - totalWidth) * 0.5f;
+        return CCRect(
+            startX + static_cast<float>(column) * (MODE_TICK_TILE_W + MODE_TICK_TILE_GAP),
+            MODE_TICK_ROW_TOP - static_cast<float>(row) * (MODE_TICK_TILE_H + MODE_TICK_TILE_GAP) - MODE_TICK_TILE_H,
+            MODE_TICK_TILE_W,
+            MODE_TICK_TILE_H
+        );
+    }
+
+    CCRect modeTickStepRect(int index, int which) {
+        auto cell = modeTickCellRect(index);
+        float const boxW = 42.f;
+        float const boxH = 20.f;
+        float const gapX = 16.f;
+        float const totalWidth = boxW * 2.f + gapX;
+        float const startX = cell.getMinX() + (cell.size.width - totalWidth) * 0.5f;
+        float const x = startX + ((which % 2) == 0 ? 0.f : boxW + gapX);
+        float const y = which < 2 ? cell.getMinY() + 30.f : cell.getMinY() + 6.f;
+        return CCRect(x, y, boxW, boxH);
+    }
+
+    CCRect modeTickIconRect(int index) {
+        auto cell = modeTickCellRect(index);
+        return CCRect(cell.getMidX() - 9.f, cell.getMaxY() - 35.f, 18.f, 18.f);
+    }
+
+    CCRect modeTicksAutoRect() {
+        return CCRect(CONTENT_RIGHT - 96.f, SETTINGS_HEADER_Y - 12.f, 96.f, 24.f);
     }
 
     CCRect logExpandRect() {
@@ -3295,12 +3490,13 @@ finally {
             Tab,
             Chip,
             Theme,
-            DragPanel,
-            Resize,
             SettingsRow,
             SettingsStep,
             ImportConfig,
             ExportConfig,
+            ModeTick,
+            ModeTickReset,
+            ModeTicksAuto,
             ReplayTutorial,
             Credits,
             ModeIcon,
@@ -3328,11 +3524,6 @@ finally {
         void updateModeIcons();
         void setConfigStatus(std::string const& text, bool ok);
         void layout();
-        CCPoint clampDeckPosition(CCPoint const& position, float scale) const;
-        CCPoint savedDeckPosition() const;
-        void saveDeckPlacement();
-        void resetDeckPlacement();
-        void finishDeckGesture();
         CCPoint defaultLauncherPosition() const;
         CCPoint clampLauncherPosition(CCPoint const& position) const;
         void saveLauncherPosition();
@@ -3362,6 +3553,7 @@ finally {
         void removePauseLayers();
         void updateHints();
         void tickRefresh(float dt);
+        void popupTick(float dt);
 
         CCLayerColor* m_scrim = nullptr;
         CCNodeRGBA* m_deck = nullptr;
@@ -3389,6 +3581,15 @@ finally {
         CCLabelBMFont* m_tabLabels[TAB_COUNT] = {};
         CCNode* m_logPane = nullptr;
         CCNode* m_stagePane = nullptr;
+        CCNode* m_modeTicksPane = nullptr;
+        CCDrawNode* m_modeTicksBar = nullptr;
+        CCLabelBMFont* m_modeTicksHeaderLabel = nullptr;
+        CCLabelBMFont* m_modeTicksHintLabel = nullptr;
+        CCLabelBMFont* m_modeTickNameLabels[MODE_TICK_COUNT] = {};
+        CCLabelBMFont* m_modeTickValueLabels[MODE_TICK_COUNT] = {};
+        CCLabelBMFont* m_modeTickBtnLabels[MODE_TICK_COUNT * 4] = {};
+        CCLabelBMFont* m_modeTicksAutoLabel = nullptr;
+        SimplePlayer* m_modeTickIcons[MODE_TICK_COUNT] = {};
         CCNode* m_modesPane = nullptr;
         CCNode* m_toolsPane = nullptr;
         CCLabelBMFont* m_modesWaveLabel = nullptr;
@@ -3489,16 +3690,8 @@ finally {
         CCPoint m_launcherDragStart;
         CCPoint m_launcherDragOffset;
         float m_deckScale = 1.f;
-        float m_baseScale = 1.f;
-        float m_fitScale = 1.f;
-        double m_lastGripTap = -10.0;
-        bool m_draggingDeck = false;
-        bool m_resizingDeck = false;
-        bool m_deckMoved = false;
-        CCPoint m_dragTouchStart;
-        CCPoint m_dragDeckStart;
-        CCPoint m_resizeTL;
         bool m_isOpen = false;
+        bool m_popupHidden = false;
         bool m_didPauseForPanel = false;
         bool m_isDraggingLauncher = false;
         bool m_launcherMoved = false;
@@ -3582,6 +3775,17 @@ finally {
         m_tabBar = nullptr;
         m_logPane = nullptr;
         m_stagePane = nullptr;
+        m_modeTicksPane = nullptr;
+        m_modeTicksBar = nullptr;
+        m_modeTicksHeaderLabel = nullptr;
+        m_modeTicksHintLabel = nullptr;
+        m_modeTicksAutoLabel = nullptr;
+        for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+            m_modeTickNameLabels[index] = nullptr;
+            m_modeTickValueLabels[index] = nullptr;
+            m_modeTickIcons[index] = nullptr;
+        }
+        for (int index = 0; index < MODE_TICK_COUNT * 4; ++index) { m_modeTickBtnLabels[index] = nullptr; }
         m_modesPane = nullptr;
         m_toolsPane = nullptr;
         m_modesWaveLabel = nullptr;
@@ -3722,11 +3926,6 @@ finally {
                     color4(tint, static_cast<int>(40.f + 170.f * fade))
                 );
             }
-        }
-        // resize grip, bottom right corner
-        for (int k = 0; k < 3; ++k) {
-            float o = 8.f + static_cast<float>(k) * 5.f;
-            m_shell->drawSegment(CCPoint(DECK_WIDTH - o, 6.f), CCPoint(DECK_WIDTH - 6.f, o), 1.1f, color4(255, 255, 255, 80));
         }
         drawCurvedRect(m_shell, CCRect(CONTENT_X, CARD_BOTTOM, CONTENT_WIDTH, CARD_HEIGHT), CARD_RADIUS, color4(surface, 255), panelTint(18), 1.f);
 
@@ -4001,6 +4200,111 @@ finally {
         m_configStatusLabel->setPosition(CCPoint(configButtonRect(2).getMaxX() + 14.f, CONFIG_BUTTON_Y));
         m_deck->addChild(m_configStatusLabel, 3);
 
+        m_modeTicksPane = CCNode::create();
+        m_modeTicksPane->setPosition(CCPoint(0.f, 0.f));
+        m_deck->addChild(m_modeTicksPane, 3);
+
+        m_modeTicksBar = makeDrawNode();
+        m_modeTicksPane->addChild(m_modeTicksBar, 1);
+        for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+            drawCurvedRect(m_modeTicksBar, modeTickCellRect(index), 7.f, panelTint(8), panelTint(22), 1.f);
+            for (int which = 0; which < 4; ++which) {
+                drawCurvedRect(
+                    m_modeTicksBar,
+                    modeTickStepRect(index, which),
+                    6.f,
+                    color4(accentColor(), 26),
+                    color4(accentColor(), 90),
+                    1.f
+                );
+            }
+        }
+        drawCurvedRect(m_modeTicksBar, modeTicksAutoRect(), 7.f, panelTint(10), panelTint(28), 1.f);
+
+        if (auto* header = makeLabel("ticks per mode", true, 0.62f, logTextColor())) {
+            header->setAnchorPoint(CCPoint(0.f, 0.5f));
+            header->setPosition(CCPoint(LOG_X + 22.f, SETTINGS_HEADER_Y));
+            m_modeTicksPane->addChild(header, 2);
+            m_modeTicksHeaderLabel = header;
+        }
+        if (auto* hint = makeLabel("top row -5 / +5, bottom row - / +, tap the tile for auto", false, 0.58f, faintTextColor())) {
+            fitLabelToWidth(hint, CONTENT_WIDTH - 44.f);
+            hint->setAnchorPoint(CCPoint(0.f, 0.5f));
+            hint->setPosition(CCPoint(LOG_X + 22.f, MODE_TICKS_HINT_Y));
+            m_modeTicksPane->addChild(hint, 2);
+            m_modeTicksHintLabel = hint;
+        }
+
+        {
+            auto* manager = GameManager::get();
+            int modeFrames[MODE_TICK_COUNT] = {};
+            IconType modeTypes[MODE_TICK_COUNT] = {
+                IconType::Cube, IconType::Ship, IconType::Ball, IconType::Ufo,
+                IconType::Wave, IconType::Robot, IconType::Spider, IconType::Swing,
+            };
+            ccColor3B modePrimary = color3(255, 255, 255);
+            ccColor3B modeSecondary = color3(255, 255, 255);
+            if (manager) {
+                modeFrames[0] = manager->getPlayerFrame();
+                modeFrames[1] = manager->getPlayerShip();
+                modeFrames[2] = manager->getPlayerBall();
+                modeFrames[3] = manager->getPlayerBird();
+                modeFrames[4] = manager->getPlayerDart();
+                modeFrames[5] = manager->getPlayerRobot();
+                modeFrames[6] = manager->getPlayerSpider();
+                modeFrames[7] = manager->getPlayerSwing();
+                modePrimary = manager->colorForIdx(manager->getPlayerColor());
+                modeSecondary = manager->colorForIdx(manager->getPlayerColor2());
+            }
+
+            for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+                auto cell = modeTickCellRect(index);
+                auto iconRect = modeTickIconRect(index);
+                if (manager) {
+                    auto* icon = SimplePlayer::create(1);
+                    if (icon) {
+                        icon->updatePlayerFrame(modeFrames[index], modeTypes[index]);
+                        icon->setColors(modePrimary, modeSecondary);
+                        icon->setScale(iconRect.size.width / 40.f);
+                        icon->setPosition(CCPoint(iconRect.getMidX(), iconRect.getMidY()));
+                        icon->setOpacity(150);
+                        m_modeTicksPane->addChild(icon, 2);
+                        m_modeTickIcons[index] = icon;
+                    }
+                }
+                if (auto* name = makeLabel(MODE_TICK_NAMES[index], true, 0.56f, softTextColor())) {
+                    fitLabelToWidth(name, MODE_TICK_TILE_W - 20.f);
+                    name->setAnchorPoint(CCPoint(0.5f, 0.5f));
+                    name->setPosition(CCPoint(cell.getMidX(), cell.getMaxY() - 10.f));
+                    m_modeTicksPane->addChild(name, 2);
+                    m_modeTickNameLabels[index] = name;
+                }
+                if (auto* value = makeLabel("auto", false, 0.54f, faintTextColor())) {
+                    value->setAnchorPoint(CCPoint(0.5f, 0.5f));
+                    value->setPosition(CCPoint(cell.getMidX(), cell.getMaxY() - 46.f));
+                    m_modeTicksPane->addChild(value, 2);
+                    m_modeTickValueLabels[index] = value;
+                }
+                static char const* stepText[4] = { "-5", "+5", "-", "+" };
+                for (int which = 0; which < 4; ++which) {
+                    auto stepRect = modeTickStepRect(index, which);
+                    if (auto* glyph = makeLabel(stepText[which], false, 0.56f, accentColor())) {
+                        fitLabelToWidth(glyph, stepRect.size.width - 6.f);
+                        glyph->setPosition(CCPoint(stepRect.getMidX(), stepRect.getMidY()));
+                        m_modeTicksPane->addChild(glyph, 2);
+                        m_modeTickBtnLabels[index * 4 + which] = glyph;
+                    }
+                }
+            }
+        }
+        if (auto* autoLabel = makeLabel("all auto", false, 0.60f, accentColor())) {
+            auto rect = modeTicksAutoRect();
+            fitLabelToWidth(autoLabel, rect.size.width - 12.f);
+            autoLabel->setPosition(CCPoint(rect.getMidX(), rect.getMidY()));
+            m_modeTicksPane->addChild(autoLabel, 2);
+            m_modeTicksAutoLabel = autoLabel;
+        }
+
         {
             auto rect = creditsRect();
             auto* button = CCNode::create();
@@ -4057,14 +4361,9 @@ finally {
 
         float fitScale = std::min(0.86f * safeArea.size.width / DECK_WIDTH, 0.86f * safeArea.size.height / DECK_HEIGHT);
         float comfortableScale = std::min(fitScale, 0.94f);
-        m_fitScale = std::max(fitScale, 0.2f);
-        m_baseScale = comfortableScale * getUIPanelScale();
-        // the grip stores its size as a multiplier of the base scale so it keeps
-        // meaning after the safe area (and with it the fit cap) changes
-        double userMul = std::clamp(Mod::get()->getSavedValue<double>("panel-user-mul", 1.0), 0.1, 8.0);
-        m_deckScale = std::min(std::max(m_baseScale * static_cast<float>(userMul), 0.2f), fitScale);
+        m_deckScale = std::min(std::max(comfortableScale * getUIPanelScale(), 0.2f), fitScale);
         m_deck->setScale(m_deckScale);
-        m_deck->setPosition(clampDeckPosition(savedDeckPosition(), m_deckScale));
+        m_deck->setPosition(CCPoint(safeArea.getMidX(), safeArea.getMidY()));
 
         double savedX = Mod::get()->getSavedValue<double>("ui-button-x", -1.0);
         double savedY = Mod::get()->getSavedValue<double>("ui-button-y", -1.0);
@@ -4079,70 +4378,6 @@ finally {
         }
         m_launcherPosition = clampLauncherPosition(m_launcherPosition);
         m_launcher->setPosition(m_launcherPosition);
-    }
-
-    CCPoint AfterflowOverlay::clampDeckPosition(CCPoint const& position, float scale) const {
-        float halfW = DECK_WIDTH * 0.5f * scale;
-        float halfH = DECK_HEIGHT * 0.5f * scale;
-        float minX = m_safeArea.getMinX() + halfW;
-        float maxX = m_safeArea.getMaxX() - halfW;
-        float minY = m_safeArea.getMinY() + halfH;
-        float maxY = m_safeArea.getMaxY() - halfH;
-        // a deck wider than the safe area inverts the range, and std::clamp with
-        // lo > hi is undefined, so pin that axis to the centre instead
-        if (maxX < minX) { minX = maxX = m_safeArea.getMidX(); }
-        if (maxY < minY) { minY = maxY = m_safeArea.getMidY(); }
-        return CCPoint(std::clamp(position.x, minX, maxX), std::clamp(position.y, minY, maxY));
-    }
-
-    CCPoint AfterflowOverlay::savedDeckPosition() const {
-        double fx = Mod::get()->getSavedValue<double>("panel-pos-x", 0.5);
-        double fy = Mod::get()->getSavedValue<double>("panel-pos-y", 0.5);
-        fx = std::clamp(fx, 0.0, 1.0);
-        fy = std::clamp(fy, 0.0, 1.0);
-        return CCPoint(
-            m_safeArea.getMinX() + static_cast<float>(fx) * m_safeArea.size.width,
-            m_safeArea.getMinY() + static_cast<float>(fy) * m_safeArea.size.height
-        );
-    }
-
-    void AfterflowOverlay::saveDeckPlacement() {
-        auto pos = m_deck->getPosition();
-        float width = std::max(1.f, m_safeArea.size.width);
-        float height = std::max(1.f, m_safeArea.size.height);
-        Mod::get()->setSavedValue<double>("panel-pos-x", (pos.x - m_safeArea.getMinX()) / width);
-        Mod::get()->setSavedValue<double>("panel-pos-y", (pos.y - m_safeArea.getMinY()) / height);
-        Mod::get()->setSavedValue<double>("panel-user-mul", m_deckScale / std::max(m_baseScale, 0.001f));
-    }
-
-    void AfterflowOverlay::resetDeckPlacement() {
-        Mod::get()->setSavedValue<double>("panel-pos-x", 0.5);
-        Mod::get()->setSavedValue<double>("panel-pos-y", 0.5);
-        Mod::get()->setSavedValue<double>("panel-user-mul", 1.0);
-        layout();
-    }
-
-    void AfterflowOverlay::finishDeckGesture() {
-        bool wasResize = m_resizingDeck;
-        bool wasMoved = m_deckMoved;
-        m_draggingDeck = false;
-        m_resizingDeck = false;
-        m_deckMoved = false;
-        m_pressedTarget = HitTarget::None;
-        if (wasMoved) {
-            saveDeckPlacement();
-        }
-        else if (wasResize) {
-            // double tap on the grip restores the default size and spot
-            double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-            if (now - m_lastGripTap < 0.45) {
-                m_lastGripTap = -10.0;
-                resetDeckPlacement();
-            }
-            else {
-                m_lastGripTap = now;
-            }
-        }
     }
 
     CCPoint AfterflowOverlay::defaultLauncherPosition() const {
@@ -4503,6 +4738,7 @@ finally {
             }
         }
         m_lastAppliedTab = m_activeTab;
+        if (m_modeTicksPane) { m_modeTicksPane->setVisible(m_activeTab == 3); }
 
         bool const showLog = m_activeTab == 0;
         bool const showStage = m_activeTab == 1;
@@ -4952,6 +5188,21 @@ finally {
             m_settingsValueLabels[2]->setColor(logTextColor());
         }
 
+        int const modeNow = activeModeIndex();
+        for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+            int const ticks = modeTicksAt(index);
+            if (m_modeTickValueLabels[index]) {
+                m_modeTickValueLabels[index]->setString(ticks > 0 ? fmt::format("{}t", ticks).c_str() : "auto");
+                m_modeTickValueLabels[index]->setColor(ticks > 0 ? onSurfaceStrong() : faintTextColor());
+            }
+            if (auto* icon = m_modeTickIcons[index]) {
+                bool const isActive = index == modeNow;
+                float const baseScale = modeTickIconRect(index).size.width / 40.f;
+                icon->setOpacity(isActive ? 255 : 150);
+                icon->setScale(baseScale * (isActive ? 1.14f : 1.f));
+            }
+        }
+
         int activeMode = -1;
         if (auto* manager = GameManager::get()) {
             if (auto* playLayer = manager->m_playLayer) {
@@ -5101,6 +5352,27 @@ finally {
         }
     }
 
+    void AfterflowOverlay::popupTick(float) {
+        auto* scene = CCScene::get();
+        bool popupOpen = false;
+        if (scene) {
+            auto* children = scene->getChildren();
+            for (unsigned int index = 0; children && index < children->count(); ++index) {
+                auto* node = typeinfo_cast<CCNode*>(children->objectAtIndex(index));
+                if (node && node != this && node->isVisible() && typeinfo_cast<FLAlertLayer*>(node)) {
+                    popupOpen = true;
+                    break;
+                }
+            }
+        }
+        if (popupOpen == m_popupHidden) {
+            return;
+        }
+        m_popupHidden = popupOpen;
+        setVisible(!popupOpen);
+        setTouchEnabled(!popupOpen && isMobileHost());
+    }
+
     void AfterflowOverlay::onEnter() {
         if (!isMobileHost()) {
             setMouseEnabled(true);
@@ -5108,6 +5380,8 @@ finally {
         CCLayer::onEnter();
         layout();
         refresh();
+        unschedule(schedule_selector(AfterflowOverlay::popupTick));
+        schedule(schedule_selector(AfterflowOverlay::popupTick), 0.15f);
         if (m_deck && !m_isOpen) {
             m_deck->setVisible(false);
         }
@@ -5127,6 +5401,7 @@ finally {
         m_pressedNode = nullptr;
         unschedule(schedule_selector(AfterflowOverlay::tickRefresh));
         unschedule(schedule_selector(AfterflowOverlay::animTick));
+        unschedule(schedule_selector(AfterflowOverlay::popupTick));
         CCLayer::onExit();
     }
 
@@ -5206,26 +5481,6 @@ finally {
             if (m_editingRow >= 0 && !(m_pressedTarget == HitTarget::TickField && stageSlot == m_editingRow)) {
                 endTickEdit();
             }
-            if (m_pressedTarget == HitTarget::DragPanel || m_pressedTarget == HitTarget::Resize) {
-                m_deck->stopAllActions();
-                m_deck->setScale(m_deckScale);
-                m_deckMoved = false;
-                m_dragTouchStart = convertTouchToNodeSpace(touch);
-                auto deckPos = m_deck->getPosition();
-                if (m_pressedTarget == HitTarget::DragPanel) {
-                    m_draggingDeck = true;
-                    m_dragDeckStart = deckPos;
-                }
-                else {
-                    m_resizingDeck = true;
-                    // the opposite (top left) corner stays put while the grip moves
-                    m_resizeTL = CCPoint(
-                        deckPos.x - DECK_WIDTH * 0.5f * m_deckScale,
-                        deckPos.y + DECK_HEIGHT * 0.5f * m_deckScale
-                    );
-                }
-                return true;
-            }
             if (m_pressedTarget == HitTarget::TickSlider) {
                 m_draggingSlider = true;
                 m_sliderRow = stageSlot;
@@ -5273,36 +5528,6 @@ finally {
             }
             m_launcherPosition = clampLauncherPosition(CCPoint(local.x + m_launcherDragOffset.x, local.y + m_launcherDragOffset.y));
             m_launcher->setPosition(m_launcherPosition);
-            return;
-        }
-
-        if (m_draggingDeck || m_resizingDeck) {
-            CCPoint local = convertTouchToNodeSpace(touch);
-            float deltaX = local.x - m_dragTouchStart.x;
-            float deltaY = local.y - m_dragTouchStart.y;
-            if (deltaX * deltaX + deltaY * deltaY > 25.f) {
-                m_deckMoved = true;
-            }
-            if (m_draggingDeck) {
-                m_deck->setPosition(clampDeckPosition(
-                    CCPoint(m_dragDeckStart.x + deltaX, m_dragDeckStart.y + deltaY), m_deckScale
-                ));
-            }
-            else if (m_deckMoved) {
-                // bottom right corner follows the finger, top left stays put
-                float scaleX = (local.x - m_resizeTL.x) / DECK_WIDTH;
-                float scaleY = (m_resizeTL.y - local.y) / DECK_HEIGHT;
-                float newScale = std::clamp((scaleX + scaleY) * 0.5f, 0.2f, m_fitScale);
-                m_deckScale = newScale;
-                m_deck->setScale(newScale);
-                m_deck->setPosition(clampDeckPosition(
-                    CCPoint(
-                        m_resizeTL.x + DECK_WIDTH * 0.5f * newScale,
-                        m_resizeTL.y - DECK_HEIGHT * 0.5f * newScale
-                    ),
-                    newScale
-                ));
-            }
             return;
         }
 
@@ -5369,11 +5594,6 @@ finally {
             else {
                 openPanel();
             }
-            return;
-        }
-
-        if (m_draggingDeck || m_resizingDeck) {
-            finishDeckGesture();
             return;
         }
 
@@ -5475,10 +5695,6 @@ finally {
     }
 
     void AfterflowOverlay::ccTouchCancelled(CCTouch*, CCEvent*) {
-        if (m_draggingDeck || m_resizingDeck) {
-            finishDeckGesture();
-            return;
-        }
         m_logDragging = false;
         m_logDragMoved = false;
         m_logViewDragging = false;
@@ -6046,9 +6262,6 @@ finally {
     }
 
     AfterflowOverlay::HitTarget AfterflowOverlay::hitTest(CCPoint const& point, int* stageSlot) const {
-        if (CCRect(DECK_WIDTH - 38.f, 0.f, 38.f, 26.f).containsPoint(point)) {
-            return HitTarget::Resize;
-        }
         if (logoRect().containsPoint(point)) {
             return HitTarget::Logo;
         }
@@ -6056,6 +6269,23 @@ finally {
             if (tabSlotRect(tabIndex).containsPoint(point)) {
                 if (stageSlot) { *stageSlot = tabIndex; }
                 return HitTarget::Tab;
+            }
+        }
+        if (m_activeTab == 3) {
+            for (int index = 0; index < MODE_TICK_COUNT; ++index) {
+                for (int which = 0; which < 4; ++which) {
+                    if (modeTickStepRect(index, which).containsPoint(point)) {
+                        if (stageSlot) { *stageSlot = index * 4 + which; }
+                        return HitTarget::ModeTick;
+                    }
+                }
+                if (modeTickCellRect(index).containsPoint(point)) {
+                    if (stageSlot) { *stageSlot = index; }
+                    return HitTarget::ModeTickReset;
+                }
+            }
+            if (modeTicksAutoRect().containsPoint(point)) {
+                return HitTarget::ModeTicksAuto;
             }
         }
         if (m_activeTab == 2 && creditsRect().containsPoint(point)) {
@@ -6152,10 +6382,6 @@ finally {
                 }
             }
         }
-        // the empty part of the top bar drags the whole panel
-        if (point.y >= DECK_HEIGHT - 54.f) {
-            return HitTarget::DragPanel;
-        }
         return HitTarget::None;
     }
 
@@ -6215,6 +6441,38 @@ finally {
 
         if (target == HitTarget::ExportConfig) {
             exportConfig();
+            return;
+        }
+
+        if (target == HitTarget::ModeTick) {
+            static int const modeDeltas[4] = { -5, 5, -1, 1 };
+            int const index = m_pressedStageSlot / 4;
+            int const which = m_pressedStageSlot % 4;
+            if (index < 0 || index >= MODE_TICK_COUNT || which < 0 || which >= 4) {
+                refresh();
+                return;
+            }
+            int const before = modeTicksAt(index);
+            int const base = before > 0 ? before : stageTicksForMode(index);
+            int const next = clampModeTicks(base + modeDeltas[which]);
+            setModeTicksAt(index, next);
+            setConfigStatus(fmt::format("{} -> {} ticks", MODE_TICK_NAMES[index], next).c_str(), true);
+            refresh();
+            return;
+        }
+
+        if (target == HitTarget::ModeTickReset) {
+            setModeTicksAt(m_pressedStageSlot, 0);
+            refresh();
+            return;
+        }
+
+        if (target == HitTarget::ModeTicksAuto) {
+            int const cleared = clearModeTicks();
+            if (cleared > 0) {
+                setConfigStatus("every mode follows the stage again", true);
+            }
+            refresh();
             return;
         }
 
@@ -6627,6 +6885,9 @@ finally {
         if (!scene || scene->getChildByType<AfterflowOverlay>(0)) {
             return;
         }
+        if (typeinfo_cast<CCTransitionScene*>(scene)) {
+            return;
+        }
         static bool announcedBuild = false;
         if (!announcedBuild) {
             announcedBuild = true;
@@ -6645,17 +6906,27 @@ finally {
         }
     }
 
+    void queueOverlayBuild(int attempts) {
+        Loader::get()->queueInMainThread([attempts] {
+            auto* runningScene = CCScene::get();
+            if (!runningScene) {
+                return;
+            }
+            if (typeinfo_cast<CCTransitionScene*>(runningScene)) {
+                if (attempts < 120) {
+                    queueOverlayBuild(attempts + 1);
+                }
+                return;
+            }
+            buildAfterflowOverlay(runningScene);
+        });
+    }
+
     void attachAfterflowOverlay(CCScene* scene) {
         if (!scene || scene->getChildByType<AfterflowOverlay>(0)) {
             return;
         }
-        // SceneEvent fires from CCDirector::willSwitchToScene, so building the
-        // deck here allocates fonts and sprites (GL textures) in the middle of a
-        // scene transition - the point where mobile crashes. Build it on the
-        // next tick against whatever scene is running by then instead.
-        Loader::get()->queueInMainThread([] {
-            buildAfterflowOverlay(CCScene::get());
-        });
+        queueOverlayBuild(0);
     }
 
     void ensureAfterflowOverlay() {
@@ -6677,7 +6948,7 @@ finally {
 
     void toggleAfterflowPanel() {
         auto* scene = CCScene::get();
-        if (!scene) {
+        if (!scene || typeinfo_cast<CCTransitionScene*>(scene)) {
             return;
         }
         auto* overlay = scene->getChildByType<AfterflowOverlay>(0);
@@ -6707,6 +6978,7 @@ finally {
         state.isInjecting = false;
         state.rapidInputTicks = 0;
         state.wasAutoReleased = false;
+        state.ghostLayerBaseIndex = 0;
         state.pathDrawNode = nullptr;
         resetPending();
     }
@@ -6714,9 +6986,15 @@ finally {
     PlayerObject* makeGhost(PlayLayer* gameLayer) {
         if (!state.ghostRenderLayer) {
             state.ghostRenderLayer = CCLayer::create();
+            if (!state.ghostRenderLayer) {
+                return nullptr;
+            }
             state.ghostRenderLayer->retain();
         }
         auto* ghostPlayer = PlayerObject::create(1, 1, gameLayer, state.ghostRenderLayer, true);
+        if (!ghostPlayer) {
+            return nullptr;
+        }
         ghostPlayer->retain();
         ghostPlayer->setPosition(CCPoint(0.f, 105.f));
         ghostPlayer->setVisible(false);
@@ -6979,11 +7257,17 @@ finally {
         ghostPlayer->updateRotation(deltaTime);
     }
 
+    void clearCollisionLog(CCDictionary* log) {
+        if (log) {
+            log->removeAllObjects();
+        }
+    }
+
     void checkGhost(PlayLayer* gameLayer, PlayerObject* ghostPlayer, float deltaTime) {
-        ghostPlayer->m_collisionLogTop->removeAllObjects();
-        ghostPlayer->m_collisionLogBottom->removeAllObjects();
-        ghostPlayer->m_collisionLogLeft->removeAllObjects();
-        ghostPlayer->m_collisionLogRight->removeAllObjects();
+        clearCollisionLog(ghostPlayer->m_collisionLogTop);
+        clearCollisionLog(ghostPlayer->m_collisionLogBottom);
+        clearCollisionLog(ghostPlayer->m_collisionLogLeft);
+        clearCollisionLog(ghostPlayer->m_collisionLogRight);
         gameLayer->checkCollisions(ghostPlayer, deltaTime, false);
     }
 
@@ -7011,7 +7295,7 @@ finally {
     int simulate(PlayLayer* gameLayer, PlayerObject* player1, PlayerObject* player2, bool isDual, int delayTicks, bool isDown, int horizonTicks, int releaseAfterTicks,
         int stopAtTick, SimEnd* simulationEnd) {
         *simulationEnd = SimEnd::Ok;
-        if (!state.ghostPlayer1) {
+        if (!state.ghostPlayer1 || !player1) {
             return horizonTicks;
         }
         state.isSimulating = true;
@@ -7895,7 +8179,9 @@ finally {
         if (hasWave) {
             horizonTicks = fullWaveHorizon(isMini);
         }
-        int maxDelayTicks = st(hasWave ? state.ticksWaveMode : (hasShip ? std::clamp(state.shipMaxDelayTicks, 0, 16) : state.ticksAllModes));
+        int const stageDelayTicks = hasWave ? state.ticksWaveMode : (hasShip ? std::clamp(state.shipMaxDelayTicks, 0, 16) : state.ticksAllModes);
+        int const modeDelayTicks = hasWave ? 0 : modeTicksAt(activeModeIndex());
+        int maxDelayTicks = st(modeDelayTicks > 0 ? modeDelayTicks : stageDelayTicks);
         if (maxDelayTicks <= 0) {
             state.hasAppliedInput = isDown;
             return false;
@@ -8097,8 +8383,6 @@ finally {
 
 $on_mod(Loaded) {
 
-    // Breadcrumbs: if the game dies during startup on a platform we cannot
-    // debug locally, the last line of the geode log points at the stage.
     log::info("afterflow: load start ({})", hostOSName());
 
     constexpr int STAGE_SCHEMA_VERSION = 2;
@@ -8199,10 +8483,18 @@ class $modify(BufPlayLayer, PlayLayer) {
         dropGhosts();
         readSettings();
         applyStage();
-        state.ghostPlayer1 = makeGhost(this);
-        state.ghostPlayer2 = makeGhost(this);
-        state.ghostLayerBaseIndex = state.ghostRenderLayer->getChildrenCount();
-        say("buffer ready | {} | {} cycles", stageText(), stageKey());
+        auto* ghost1 = makeGhost(this);
+        auto* ghost2 = makeGhost(this);
+        if (!ghost1 || !ghost2 || !state.ghostRenderLayer) {
+            dropGhosts();
+            log::warn("afterflow: could not create buffer players, buffering disabled for this level");
+        }
+        else {
+            state.ghostPlayer1 = ghost1;
+            state.ghostPlayer2 = ghost2;
+            state.ghostLayerBaseIndex = state.ghostRenderLayer->getChildrenCount();
+            say("buffer ready | {} | {} cycles", stageText(), stageKey());
+        }
         checkForUpdates(false);
         state.hasRealInput = false;
         state.hasAppliedInput = false;
@@ -8313,10 +8605,6 @@ namespace {
         face->setContentSize(CCSize(size, size));
         face->setAnchorPoint(CCPoint(0.5f, 0.5f));
 
-        // The halo is the logo itself, scaled up ring by ring, accent tinted and
-        // added instead of alpha blended. Every copy carries the icon
-        // silhouette, so the bloom follows the rounded square and the arrow
-        // instead of drawing a circle the icon sits inside of.
         for (int ring = 5; ring >= 1; --ring) {
             auto* copy = makeLogoMark(size);
             if (!copy) {
@@ -8420,8 +8708,7 @@ public:
             savePosition();
             return;
         }
-        // The panel tears down the pause layer from inside the touch callback;
-        // queue it so the dispatcher is done with this delegate first.
+
         Loader::get()->queueInMainThread([] {
             toggleAfterflowPanel();
         });
@@ -8572,9 +8859,7 @@ class $modify(BufMenuLayer, MenuLayer) {
         this->runAction(CCSequence::create(
             CCDelayTime::create(0.2f),
             CallFuncExt::create([] {
-                // Version check moved off mod load: on iOS the loader is still
-                // bringing up its runtime when mods load, and starting a web
-                // request there is the first thing that can run too early.
+
                 log::info("afterflow: menu ready");
                 checkForUpdates(true);
                 if (!showUpdatePopup()) {
@@ -8769,6 +9054,7 @@ class $modify(BufPlayerObject, PlayerObject) {
         if (!ghostEffect()) PlayerObject::playBumpEffect(gameObjectType, gameObject);
     }
 
+#ifndef GEODE_IS_IOS
     void playSpawnEffect() {
         if (!ghostEffect()) PlayerObject::playSpawnEffect();
     }
@@ -8800,6 +9086,7 @@ class $modify(BufPlayerObject, PlayerObject) {
     void runNormalRotation(bool isNotNormalMode, float speedValue) {
         if (!ghostEffect()) PlayerObject::runNormalRotation(isNotNormalMode, speedValue);
     }
+#endif
 
     void toggleGhostEffect(GhostType ghostType) {
         if (!ghostEffect()) PlayerObject::toggleGhostEffect(ghostType);
